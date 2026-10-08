@@ -8,7 +8,7 @@ from qiskit_ibm_runtime import (
 
 
 def IBM_instance_key(token: str, instance: str, opl: int = 1,
-                     backend_name: str = "ibm_phoenix", n_show: int = 5):
+                     backend_name: str = "ibm_phoenix", n_show: int = 5, least_busy: bool = True, min_num_qubits: int = 1):
     """
     Save the IBM Cloud credentials, connect, and prepare a transpiler for one
     backend.
@@ -43,7 +43,12 @@ def IBM_instance_key(token: str, instance: str, opl: int = 1,
     # Verify the credentials by connecting and listing backends.
     service = QiskitRuntimeService()
     backends = service.backends()
-    backend = service.backend(backend_name)
+    if least_busy:
+        backend = service.least_busy(min_num_qubits=min_num_qubits, simulator=False, operational=True)
+        print(f"Least busy backend selected: {backend.name}")
+    else:
+        backend = service.backend(backend_name)
+
     print(f"Account OK. {len(backends)} backend(s) available:")
     for b in backends[:n_show]:
         print(f"  {b.name} ({b.num_qubits} qubits)")
