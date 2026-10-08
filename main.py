@@ -2,7 +2,8 @@ import numpy as np
  
 from PDE_preparation import PDE_preper   
 from HHL_solver import HHL_solver  
-from viz PDE_postprocessor
+from viz import PDE_postprocessor, IBM_QPU_helper
+
 
 # --- inputs ---
 c = 1.0
@@ -58,8 +59,8 @@ post.plot_comparison(u_cl, u_q, dense=True)
  
 # --- 4. IBM quantum hardware run ---
 # Read credentials from environment variables instead of hard-coding them.
-token = os.environ["IBM_TOKEN"]
-instance = os.environ["IBM_INSTANCE"]
+token = # paste your IBM token
+instance = # Paste your IBM quantum cloud instance to access QPUs
  
 SHOTS_IBM = 10000
 SUBMIT_JOB = False      # True = actually submit (spends QPU time)
