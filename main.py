@@ -47,3 +47,32 @@ print("Aer (signed) vs classical:", post.error_summary(u_cl, u_q))
 
 u_of_xt, v_of_xt = post.make_uv_of_xt(u_q, v_q)
 post.plot_comparison(u_cl, u_q, dense=True)
+
+
+# --- 4. IBM quantum hardwere run ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
