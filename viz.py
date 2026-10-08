@@ -217,3 +217,167 @@ class PDE_postprocessor:
         if show:
             plt.show()
         return fig
+
+
+class IBM_QPU_helper:
+    """
+    Post-processing for results that come back as measurement COUNTS
+    (IBM hardware, or any shot-based run): fetch the counts from a job,
+    turn them into the PDE solution, and plot them against the classical
+    solution.
+
+    Built from an `HHL_solver` (circuit layout and scaling constants) and a
+    `PDE_postprocessor` (grids, boundary/initial conditions, interpolation).
+
+    Typical usage
+    -------------
+        qpu    = IBM_QPU_helper(hhl, post)
+        counts = qpu.get_counts_from_job(job)          # waits for the job
+        ibm    = qpu.counts_to_solution_abs(counts)    # |w| from the counts
+        qpu.plot_runs(u_classical, {"IBM hardware": u_ibm})
+    """
+
+    def __init__(self, hhl, post):
+        """
+        Parameters
+        ----------
+        hhl  : HHL_solver
+            Provides nb, nl (qubit layout), params (||b||, C) and N_raw.
+        post : PDE_postprocessor
+            Provides grids, build_full_u and make_uv_of_xt for plotting.
+        """
+        self.hhl = hhl
+        self.post = post
+
+    # ------------------------------------------------------------------
+    # 1. Counts from a Sampler job
+    # ------------------------------------------------------------------
+    @staticmethod
+    def get_counts_from_job(job):
+        """
+        Block until the Sampler job is done and return its counts as a dict
+        {bitstring: count}. measure_all() names the classical register
+        "meas"; if that is missing, fall back to the first register that
+        has counts.
+        """
+        data = job.result()[0].data               # first (only) circuit
+        register = getattr(data, "meas", None)
+        if register is None:
+            name = next(f for f in dir(data)
+                        if not f.startswith("_") and hasattr(getattr(data, f), "get_counts"))
+            register = getattr(data, name)
+        return register.get_counts()
+
+    # ------------------------------------------------------------------
+    # 2. Counts -> solution
+    # ------------------------------------------------------------------
+    def counts_to_solution_abs(self, counts):
+        """
+        Same post-processing as `HHL_solver.run_aer`, but for any counts
+        dict (here: counts from IBM hardware).
+
+        Keeps shots with ancilla = 1 and clock = 0, converts them to
+        |amplitudes| = sqrt(count / total_shots) and rescales by ||b|| / C.
+        Counts only give probabilities, so signs are lost (see
+        `PDE_postprocessor.apply_signs`).
+
+        Returns a dict with:
+          solution_abs : |w| (length Nt*block_dim)
+          n_post       : number of shots that survived post-selection
+          shots        : total shots
+          sys_counts   : post-selected counts per system basis state
+        """
+        hhl = self.hhl
+        shots = sum(counts.values())
+        nb, nl = hhl.nb, hhl.nl
+
+        sys_counts = np.zeros(2 ** nb)
+        for bitstring, n in counts.items():
+            # Bitstring is MSB first: [anc | clock | sys]; qubit i = bit i of idx.
+            idx = int(bitstring.replace(" ", ""), 2)
+            anc_bit = (idx >> (nb + nl)) & 1
+            clock_val = (idx >> nb) & (2 ** nl - 1)
+            if anc_bit == 1 and clock_val == 0:
+                sys_counts[idx & (2 ** nb - 1)] += n
+
+        n_post = int(sys_counts.sum())
+        # P(anc=1, clock=0, sys=j) = |amp_j|^2, divided by ALL shots.
+        amp_abs = np.sqrt(sys_counts / shots)
+        z = amp_abs * hhl.params["norm_b"] / hhl.params["C"]   # solution of A z = b
+        z = z[: hhl.N_raw]                                      # drop padding
+        return dict(solution_abs=np.abs(z[hhl.N_raw // 2:]),    # z = [0; w] -> w
+                    n_post=n_post, shots=shots, sys_counts=sys_counts)
+
+    # ------------------------------------------------------------------
+    # 3. Plot classical vs any number of runs
+    # ------------------------------------------------------------------
+    def plot_runs(self, u_classical, runs, dense=True, n_dense=80,
+                  show=True, save_path=None):
+        """
+        Compare the classical solution with any number of quantum runs.
+
+        Top row    : classical, then each run (shared colour scale).
+        Bottom row : difference (classical - run) for each run, on one
+                     shared symmetric scale so the errors are comparable.
+
+        Parameters
+        ----------
+        u_classical : (Nt, Nx) classical history.
+        runs        : dict {label: (Nt, Nx) history}, e.g.
+                      {"Aer": u_q, "IBM hardware": u_ibm}.
+        dense       : interpolate onto an n_dense x n_dense grid (same data,
+                      just smoother-looking) instead of the raw grid.
+        show        : call plt.show().
+        save_path   : if given, save the figure there.
+
+        Returns the matplotlib Figure.
+        """
+        post = self.post
+
+        def field(u_hist):
+            if not dense:
+                return post.x_full, post.t_full, post.build_full_u(u_hist)
+            u_of_xt, _ = post.make_uv_of_xt(u_hist, np.zeros_like(u_hist))
+            X = np.linspace(0, post.Lx, n_dense)
+            T = np.linspace(0, post.T, n_dense)
+            Xg, Tg = np.meshgrid(X, T)
+            return X, T, u_of_xt(Xg.ravel(), Tg.ravel()).reshape(Xg.shape)
+
+        X, T, U_c = field(u_classical)
+        fields = {label: field(u)[2] for label, u in runs.items()}
+        diffs = {label: U_c - U for label, U in fields.items()}
+
+        vmax = max(np.abs(U_c).max(), *(np.abs(U).max() for U in fields.values()))
+        diff_max = max(max(np.abs(d).max() for d in diffs.values()), 1e-12)
+
+        ncol = 1 + len(runs)
+        fig, axes = plt.subplots(2, ncol, figsize=(5 * ncol, 8), sharey=True, squeeze=False)
+
+        # Top row: solutions
+        im = axes[0, 0].pcolormesh(X, T, U_c, shading="auto", cmap="RdBu_r",
+                                   vmin=-vmax, vmax=vmax)
+        axes[0, 0].set_title("Classical u(x,t)")
+        for k, (label, U) in enumerate(fields.items(), start=1):
+            im = axes[0, k].pcolormesh(X, T, U, shading="auto", cmap="RdBu_r",
+                                       vmin=-vmax, vmax=vmax)
+            axes[0, k].set_title(f"{label} u(x,t)")
+        fig.colorbar(im, ax=axes[0, :].tolist(), shrink=0.9)
+
+        # Bottom row: differences (first cell is left empty)
+        axes[1, 0].axis("off")
+        for k, (label, d) in enumerate(diffs.items(), start=1):
+            imd = axes[1, k].pcolormesh(X, T, d, shading="auto", cmap="RdBu_r",
+                                        vmin=-diff_max, vmax=diff_max)
+            axes[1, k].set_title(f"Classical − {label}")
+        fig.colorbar(imd, ax=axes[1, 1:].tolist(), shrink=0.9)
+
+        for ax in list(axes[0, :]) + list(axes[1, 1:]):
+            ax.set_xlabel("x")
+        for ax in axes[:, 0]:
+            ax.set_ylabel("t")
+
+        if save_path:
+            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        if show:
+            plt.show()
+        return fig
