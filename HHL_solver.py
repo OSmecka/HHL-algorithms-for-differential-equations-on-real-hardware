@@ -3,9 +3,6 @@ from qiskit import QuantumCircuit, QuantumRegister
 from qiskit.circuit.library import PauliEvolutionGate, HamiltonianGate, RYGate
 from qiskit.quantum_info import Statevector, SparsePauliOp
 from qiskit.synthesis import SuzukiTrotter
-
-# QFT moved from a circuit class (QFT) to a gate (QFTGate) in recent Qiskit
-# versions. Support both so the class works on either.
 try:
     from qiskit.circuit.library import QFTGate
 
