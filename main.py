@@ -51,17 +51,11 @@ post.plot_comparison(u_cl, u_q, dense=True)
 
 # --- 4. IBM quantum hardwere run ---
 
+service, backend, isa_pm = IBM_instance_key(token, instance, opl=3)
 
+Sampler_time_estimate(hhl.circuit, backend, "HHL_wave", SHOTS=10000)
 
-
-
-
-
-
-
-
-
-
+job, job_id = Sampler_RUN(hhl.circuit, backend, isa_pm, service, "HHL_wave", SHOTS=10000, SUBMIT_JOB=False)
 
 
 
