@@ -1,11 +1,4 @@
 import numpy as np
- 
-from PDE_preparation import PDE_preper   
-from HHL_solver import HHL_solver  
-from viz import PDE_postprocessor, IBM_QPU_helper
-
-import os
-import numpy as np
 
 from PDE_preparation import PDE_preper
 from HHL_solver import HHL_solver
@@ -20,6 +13,12 @@ T, Nt = 1.0, 2
 u0_func = lambda x: np.sin(np.pi * x / Lx)
 v0_func = lambda x: np.zeros_like(x)
 f_func = lambda x, t: np.zeros_like(x)      # no forcing: standing wave
+
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+token = # paste your IBM token 
+instance = # Paste your IBM instance to access QPUs
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
 
 prep = PDE_preper(c, u0_func, v0_func, f_func, Lx, Nx, T, Nt)
 hhl = HHL_solver.from_pde_preper(prep)
@@ -58,9 +57,6 @@ u_of_xt, v_of_xt = post.make_uv_of_xt(u_q, v_q)
 post.plot_comparison(u_cl, u_q, dense=True)
 
 # --- 4. IBM quantum hardware run ---
-# Read credentials from environment variables instead of hard-coding them.
-token = os.environ["IBM_TOKEN"]
-instance = os.environ["IBM_INSTANCE"]
 
 SHOTS_IBM = 10000
 SUBMIT_JOB = False      # True = actually submit (spends QPU time)
