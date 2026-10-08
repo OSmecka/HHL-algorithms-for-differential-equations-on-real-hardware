@@ -4,13 +4,15 @@ from qiskit.circuit.library import PauliEvolutionGate, HamiltonianGate, RYGate
 from qiskit.quantum_info import Statevector, SparsePauliOp
 from qiskit.synthesis import SuzukiTrotter
 
+# QFT moved from a circuit class (QFT) to a gate (QFTGate) in recent Qiskit
+# versions. Support both so the class works on either.
 try:
     from qiskit.circuit.library import QFTGate
 
     def _qft(n, inverse=False):
         gate = QFTGate(n)
         return gate.inverse() if inverse else gate
-except ImportError:
+except ImportError:  # older Qiskit
     from qiskit.circuit.library import QFT
 
     def _qft(n, inverse=False):
@@ -347,23 +349,97 @@ class HHL_solver:
         qc = self.build_circuit()
         amp, success_prob = self.extract_solution_statevector(qc)
 
-        z = amp * self.params["norm_b"] / self.params["C"]   # solution of A z = b
-        z = z[: self.N_raw]                                   # drop padding
-        solution = z[self.N_raw // 2:]                        # z = [0; w] -> w
+        solution = self._amplitudes_to_solution(amp)
         return dict(solution=solution, success_prob=success_prob, amp=amp)
+
+    def _amplitudes_to_solution(self, amp):
+        """
+        Post-selected amplitudes equal C * A^{-1} b / ||b||. Multiply by
+        ||b|| / C to restore the true scale, drop the padding, and keep the
+        second half of the dilated vector z = [0; w] (= the PDE solution w).
+        """
+        z = amp * self.params["norm_b"] / self.params["C"]
+        z = z[: self.N_raw]
+        return z[self.N_raw // 2:]
+
+    def run_aer(self, shots=200000, noise_model=None, optimization_level=1, seed=None):
+        """
+        Shot-based run on a local AerSimulator (optionally with noise).
+
+        Measures every qubit, post-selects on ancilla = 1 and clock = 0, and
+        turns the surviving counts into |amplitudes|. Shot counts only give
+        probabilities, so the SIGNS of the solution entries are lost: the
+        result is |w|, not w. (The exact Statevector route in `solve()`
+        keeps signs.)
+
+        Parameters
+        ----------
+        shots              : number of shots.
+        noise_model        : optional qiskit_aer NoiseModel.
+        optimization_level : transpiler level (3 can be very slow for the
+                             large controlled unitaries; 1 is a good default).
+        seed               : seed for the simulator and transpiler.
+
+        Returns a dict with:
+          sys_counts   : post-selected counts per system basis state
+          n_post       : number of shots that survived post-selection
+          shots        : total shots
+          solution_abs : |w| estimated from the counts (length 2*Nx*Nt)
+        """
+        from qiskit import transpile
+        from qiskit_aer import AerSimulator
+
+        qc = self.circuit if self.circuit is not None else self.build_circuit()
+        backend = AerSimulator(noise_model=noise_model, seed_simulator=seed)
+
+        qc_meas = qc.copy()
+        qc_meas.measure_all()
+        tqc = transpile(qc_meas, backend, optimization_level=optimization_level,
+                        seed_transpiler=seed)
+        counts = backend.run(tqc, shots=shots).result().get_counts()
+
+        nb, nl = self.nb, self.nl
+        sys_counts = np.zeros(2 ** nb)
+        for bitstring, n in counts.items():
+            # Bitstring is MSB first: [anc | clock | sys]. Qubit i = bit i of
+            # the integer, matching the Statevector index layout.
+            idx = int(bitstring.replace(" ", ""), 2)
+            anc_bit = (idx >> (nb + nl)) & 1
+            clock_val = (idx >> nb) & (2 ** nl - 1)
+            if anc_bit == 1 and clock_val == 0:
+                sys_counts[idx & (2 ** nb - 1)] += n
+
+        n_post = int(sys_counts.sum())
+        if self.verbose:
+            if n_post == 0:
+                print("Aer: no shots survived post-selection.")
+            else:
+                print(f"Aer: {n_post}/{shots} shots survived "
+                      f"({100 * n_post / shots:.2f}%)")
+
+        # P(anc=1, clock=0, sys=j) = |amp_j|^2, so |amp_j| = sqrt(count_j/shots)
+        # (note: divided by ALL shots, not just the post-selected ones).
+        amp_abs = np.sqrt(sys_counts / shots)
+        return dict(sys_counts=sys_counts, n_post=n_post, shots=shots,
+                    solution_abs=np.abs(self._amplitudes_to_solution(amp_abs)))
 
     def classical_solution(self):
         """Reference solution w from a direct classical solve of A z = b."""
         z = np.linalg.solve(self.A_raw, self.b_raw)
         return z[self.N_raw // 2:]
 
-    def compare(self, solution):
+    def compare(self, solution, magnitude=False):
         """
         Compare an HHL solution with the classical one. Returns
         (fidelity, relative_error). Fidelity (normalised overlap) is the
         natural HHL metric, since HHL fundamentally returns a quantum state.
+
+        magnitude=True compares against |classical| instead; use it for the
+        sign-free result of `run_aer`.
         """
         ref = self.classical_solution()
+        if magnitude:
+            ref = np.abs(ref)
         fid = abs(np.vdot(ref, solution)) / (np.linalg.norm(ref) * np.linalg.norm(solution))
         rel = np.linalg.norm(solution - ref) / np.linalg.norm(ref)
         return fid, rel
