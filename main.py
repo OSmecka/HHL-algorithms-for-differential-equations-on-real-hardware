@@ -1,8 +1,9 @@
 import numpy as np
  
-from PDE_preparation import PDE_preper   # file containing the PDE_preper class
-from HHL_solver import HHL_solver        # file containing the HHL_solver class
- 
+from PDE_preparation import PDE_preper   
+from HHL_solver import HHL_solver  
+from viz.pyimport PDE_postprocessor
+
 # --- inputs ---
 c = 1.0
 Lx, Nx = 1.0, 2
@@ -31,3 +32,18 @@ fid_a, rel_a = hhl.compare(aer["solution_abs"], magnitude=True)
 u_abs, v_abs = hhl.reshape_solution(aer["solution_abs"])
 print(f"[Aer] fidelity vs |classical| = {fid_a:.6f}, relative error = {rel_a:.4f}")
 print("|u| (rows = time steps):\n", u_abs)
+
+# --- 3. Post-processing: u(x,t), v(x,t) and classical-vs-quantum plots ---
+
+post = PDE_postprocessor(prep)
+
+w_classical = hhl.classical_solution()
+u_cl, v_cl = post.reshape_to_uv(w_classical)
+
+w_aer = post.apply_signs(aer["solution_abs"], out["solution"])
+u_q, v_q = post.reshape_to_uv(w_aer)
+
+print("Aer (signed) vs classical:", post.error_summary(u_cl, u_q))
+
+u_of_xt, v_of_xt = post.make_uv_of_xt(u_q, v_q)
+post.plot_comparison(u_cl, u_q, dense=True)
