@@ -1,0 +1,95 @@
+import numpy as np
+
+
+# 1. Spatial operator: discrete d^2/dx^2 with homogeneous Dirichlet BCs
+# ----------------------------------------------------------------------
+
+def spatial_laplaceian(Nx, dx):
+    """
+    (Nx x Nx) tridiagonal, symmetric negative-semidefinite matrix
+    approximating d^2/dx^2 on Nx interior points, with u=0 enforced
+    at both boundaries (those points are eliminated, not part of the
+    unknown vector).
+    """
+    
+    main = -2.0 * np.ones(Nx)
+    off = np.ones(Nx - 1)
+    D_xx = (np.diag(main) + np.diag(off, 1) + np.diag(off, -1)) / dx**2
+    return D_xx
+
+def wave_generator(c, D_xx):
+    """
+    First-order-in-time generator L for w = [u; v], v = du/dt:
+        dw/dt = L w + [0; f]
+        L = [[0, I], [c^2 * D_xx, 0]]
+    L is NOT symmetric.
+    """
+    
+    Nx = D_xx.shape[0]
+    Z, I = np.zeros((Nx, Nx)), np.eye(Nx)
+    L = np.block([[Z, I], [c**2 * D_xx, Z]])
+
+    return L    
+
+# 2. PDE discretization: wave eq, Crank-Nicolson in time, block-bidiagonal
+# ----------------------------------------------------------------------
+def discretize_wave_pde(c, u0_func, v0_func, f_func, Lx, Nx, T, Nt):
+    """
+    Discretize u_tt = c^2 u_xx + f(x,t) on [0, Lx] x [0, T] with
+    homogeneous Dirichlet BCs u(0,t) = u(Lx,t) = 0, via:
+      - central differences in space (Nx interior points)
+      - Crank-Nicolson in time on the first-order system w = [u, v]
+        (Nt steps, must be a power of 2 for the HHL dilation)
+ 
+    (I - dt/2 L) w^{n+1} = (I + dt/2 L) w^n + dt/2 (f^n + f^{n+1})
+ 
+    Returns
+    -------
+    M      : (2*Nx*Nt, 2*Nx*Nt) block-bidiagonal, non-symmetric
+    rhs    : right-hand side
+    x_grid, t_grid : spatial / temporal grids
+    block_dim : size of each per-time-step block (= 2*Nx), needed to
+                slice u and v back out of the solution vector
+    """
+    assert (Nt & (Nt - 1) == 0) and Nt > 0, "Nt must be a power of 2"
+    dx = Lx / (Nx + 1)
+    dt = T / Nt
+    x_grid = np.linspace(dx, Lx - dx, Nx)
+    t_grid = np.linspace(dt, T, Nt)
+ 
+    D_xx = spatial_laplaceian(Nx, dx)
+    L = wave_generator(c, D_xx)
+    block_dim = 2 * Nx
+    I_block = np.eye(block_dim)
+ 
+    diag_block = I_block - (dt / 2) * L      # multiplies w^{n+1}
+    sub_block = -(I_block + (dt / 2) * L)    # multiplies w^n, moved to LHS
+ 
+    M = np.zeros((Nt * block_dim, Nt * block_dim))
+    rhs = np.zeros(Nt * block_dim)
+ 
+    w0 = np.concatenate([u0_func(x_grid), v0_func(x_grid)])
+    f_prev = np.concatenate([np.zeros(Nx), f_func(x_grid, 0.0)])
+ 
+    for n in range(Nt):
+        r0, r1 = n * block_dim, (n + 1) * block_dim
+        M[r0:r1, r0:r1] = diag_block
+        f_next = np.concatenate([np.zeros(Nx), f_func(x_grid, t_grid[n])])
+ 
+        if n > 0:
+            M[r0:r1, r0 - block_dim:r0] = sub_block
+        else:
+            # known w0 moves from "subdiagonal times unknown" to the RHS
+            rhs[r0:r1] += -sub_block @ w0
+ 
+        rhs[r0:r1] += (dt / 2) * (f_prev + f_next)
+        f_prev = f_next
+ 
+    return M, rhs, x_grid, t_grid, block_dim
+ 
+ 
+def hermitian_dilation(M, rhs):
+    N = M.shape[0]
+    A = np.block([[np.zeros((N, N)), M], [M.T, np.zeros((N, N))]])
+    b_vec = np.concatenate([rhs, np.zeros(N)])
+    return A, b_vec
