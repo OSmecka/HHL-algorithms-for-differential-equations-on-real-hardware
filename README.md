@@ -1,6 +1,6 @@
 # HHL Algorithms for Differential Equations on Real Hardware
 
-A Qiskit implementation of the Harrow–Hassidim–Lloyd (HHL) quantum linear-system algorithm applied to a partial differential equation, the 1D wave equation, with a full pipeline from PDE discretization to execution on IBM quantum hardware.
+A Qiskit implementation of the Harrow–Hassidim–Lloyd (HHL) quantum linear-system algorithm applied to a partial differential equation, the 1D wave equation, with a full pipeline from PDE discretization to execution on IBM quantum hardware, plus a study of how each error source converges against its theoretical rate.
 
 The code discretizes the PDE into one large linear system, solves it with HHL on three backends (exact statevector, shot-based Aer simulator, IBM QPU), and compares each result against a classical solve.
 
@@ -48,12 +48,13 @@ so that `A z = b` gives `z = [0; W]` and the PDE solution is the second half of 
 
 | File | Purpose |
 |---|---|
-| `main.py` | End-to-end example: builds the system, runs statevector, Aer and IBM, and plots the comparison |
+| `main.py` | Entry point with command-line options: builds the system, runs statevector and Aer, plots the comparison, and optionally runs the convergence study and the IBM hardware run |
 | `PDE_preparation.py` | `PDE_preper`: discretizes the wave equation and builds the dilated Hermitian system |
 | `HHL_solver.py` | `HHL_solver`: parameter selection, circuit construction, statevector/Aer execution, comparison metrics |
 | `HHL_approx_solver.py` | `HHL_reciprocal`: replaces the exact eigenvalue-inversion loop (O(2^nl) multi-controlled rotations) with a piecewise-linear rotation gate, plus a validation routine. Not used by `main.py` |
 | `IBM_runner.py` | IBM Quantum connection, QPU time estimate, job submission and reloading |
 | `viz.py` | `PDE_postprocessor` and `IBM_QPU_helper`: reshape the solution into u(x,t) and v(x,t), and plot classical vs. quantum results |
+| `Convergence.py` | Observed vs. theoretical convergence rates for the discretization, HHL and sampling errors, with a summary plot. Also holds the shared command-line parser used by `main.py` |
 
 ## Installation
 
@@ -67,39 +68,92 @@ The code uses `QFTGate` and falls back to `QFT` on older Qiskit versions.
 
 ## Usage
 
-Edit the inputs at the top of `main.py`:
-
-```python
-c = 1.0
-Lx, Nx = 1.0, 2            # domain length, interior grid points
-T, Nt = 1.0, 2             # final time, time steps (power of 2)
-u0_func = lambda x: np.sin(np.pi * x / Lx)
-v0_func = lambda x: np.zeros_like(x)
-f_func  = lambda x, t: np.zeros_like(x)   # no forcing: standing wave
-```
-
-Then run:
-
 ```bash
-python main.py
+python main.py [options]
 ```
 
-The script runs the exact statevector solve, the Aer shot-based run, and the classical comparison with plots. It then connects to IBM Quantum and prints a QPU time estimate.
+With no options it solves the default problem: a standing wave (`c = 1`, `Lx = 1`, `T = 1`, `Nx = 2`, `Nt = 2`, `u0 = sin(πx/Lx)`, `v0 = 0`, no forcing). It runs the exact statevector solve and the Aer shot-based run, compares both with the classical solution, and plots the result.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--c` | 1.0 | wave speed |
+| `--Lx` | 1.0 | domain length |
+| `--T` | 1.0 | final time |
+| `--mode` | 1 | standing-wave mode, `u0 = sin(mode·πx/Lx)` |
+| `--nx` | 2 | interior spatial points |
+| `--nt` | 2 | time steps (must be a power of 2) |
+| `--shots-aer` | 200000 | shots for the local Aer run |
+| `--no-plot` | off | skip all figures |
+| `--convergence` | off | also run the convergence study (see below) |
+| `--skip-quantum` | off | convergence study: classical discretization only |
+| `--save-dir` | none | convergence study: directory for PNG figures |
+| `--ibm` | off | also connect to IBM Quantum (see below) |
+| `--submit` | off | with `--ibm`: actually submit the job (spends QPU time) |
+| `--job-id` | none | with `--ibm`: reload a finished job instead of submitting |
+| `--shots-ibm` | 10000 | shots for the IBM run |
+
+To solve a different equation (another `v0` or a forcing term `f`), edit the three input functions at the top of `main()`.
 
 ### Running on IBM hardware
 
 1. Create an IBM Cloud account and get an API key and instance.
-2. Set `token` and `instance` in `main.py`. To avoid committing credentials, read them from environment variables instead, for example `token = os.environ["IBM_TOKEN"]`.
-3. Set `SUBMIT_JOB = True` to submit. It is `False` by default so a stray run never spends QPU time.
-4. To reload a finished job instead of resubmitting, set `JOB_ID` to its id.
+2. Provide the credentials as environment variables so they are never committed:
 
-`IBM_instance_key` saves your credentials with `QiskitRuntimeService.save_account(..., overwrite=True)`, replacing any previously saved account, and by default picks the least busy operational backend. Pass `least_busy=False` and `backend_name=...` to target a specific device. Circuits are transpiled to the backend's native gates with the optimization level set by `opl` (3 in `main.py`).
+   ```bash
+   export IBM_TOKEN="<your API key>"
+   export IBM_INSTANCE="<your instance CRN or name>"
+   ```
+
+3. Run:
+
+   ```bash
+   python main.py --ibm                  # connect and print the QPU time estimate only
+   python main.py --ibm --submit         # submit the job (spends QPU time)
+   python main.py --ibm --job-id <id>    # reload a finished job
+   ```
+
+Nothing is submitted unless you pass `--submit`. Because a queued job can take a long time, the IBM step runs last, after any convergence study.
+
+`IBM_instance_key` saves your credentials with `QiskitRuntimeService.save_account(..., overwrite=True)`, replacing any previously saved account, and by default picks the least busy operational backend. Pass `least_busy=False` and `backend_name=...` to target a specific device. Circuits are transpiled to the backend's native gates with optimization level 3.
+
+## Convergence analysis
+
+`Convergence.py` measures how each error source in the pipeline shrinks as its resolution parameter improves, and compares the observed order with the theoretical one.
+
+| Error source | Functions | Parameter | Expected behavior |
+|---|---|---|---|
+| Spatial discretization | `spatial_convergence` | `dx` | second order |
+| Temporal discretization | `temporal_convergence` | `dt` | second order (Crank–Nicolson) |
+| Total discretization | `joint_convergence` | `dx` with `dt/dx` fixed | second order |
+| HHL clock resolution | `hhl_clock_convergence` | clock qubits `nl` | error ∼ κ / 2^nl |
+| Trotter approximation | `hhl_trotter_convergence` | repetitions | error ∼ reps^(-order) |
+| Finite shots | `sampling_convergence` | shots | error ∼ shots^(-1/2), with a closed-form prediction printed alongside |
+
+The reference problem is the standing wave `u(x,t) = sin(mπx/Lx) cos(mπct/Lx)`, which is the default input of `main.py`. The discretization studies need only numpy, scipy and matplotlib. On the default setup their observed order approaches 2 as the grid is refined.
+
+Run it from `main.py` or on its own:
+
+```bash
+python main.py --convergence                   # after the normal run
+python Convergence.py                          # everything, with the summary plot
+python Convergence.py --skip-quantum           # classical discretization only (no Qiskit needed)
+python Convergence.py --save-dir figures       # also save PNGs
+python Convergence.py --no-plot                # tables only
+```
+
+Each study prints a table with the fitted order. At the end a summary figure shows one log-log panel per study with the theoretical slope as a dashed line. It is drawn by default and can be turned off with `--no-plot`, or with `plot=False` when calling `run_all(...)` from Python. With `--save-dir`, the summary is saved as `convergence_summary.png` together with one PNG per study. The summary can also be drawn from saved results with `plot_summary(results)`.
+
+Notes:
+- **Cost.** The HHL studies run many statevector simulations. For the default grid the system needs at least 7 clock qubits, so the clock sweep (from one below the minimum to two above) is the slowest part. The Trotter study uses a fixed 4 clock qubits to stay affordable; `HHL_solver` prints a resolution warning for that, which is harmless there because both runs share the same clock.
+- **The clock trend is rough.** Eigenphases fall between clock bins irregularly, so individual points are not monotone and the fitted order is only indicative.
+- **Sampling.** By default the shots are drawn from the exact statevector probabilities, which equals a perfect noise-free simulator. The error against the classical solution flattens at the HHL algorithmic floor, which more shots cannot remove.
+- **Reference solution.** The exact solution is known only for the standing wave with no forcing. For other inputs only the HHL-versus-classical comparisons apply.
 
 ## Interpreting the results
 
 - **Fidelity and relative error** against the classical solution are printed for each backend. Fidelity (normalized overlap) is the natural HHL metric, since HHL returns a quantum state.
 - **Signs.** Shot counts only give probabilities, so Aer and IBM results contain magnitudes only. For plotting, `PDE_postprocessor.apply_signs` borrows the signs from the exact statevector solution. This is a diagnostic aid, not an independent quantum result; the sign-free fidelity is reported separately.
-- **Noise floor.** On hardware, `main.py` reports the post-selection survival rate and compares it with a noise floor of about `1 / 2^(nl+1)`. If the survival rate is close to that floor, the output is probably noise rather than a solution, and a warning is printed.
+- **Noise floor.** On hardware, the post-selection survival rate is compared with a noise floor of about `1 / 2^(nl+1)`. If the survival rate is close to that floor, the output is probably noise rather than a solution, and a warning is printed.
 - **Smoothed plots.** With `dense=True`, plots are linearly interpolated onto a finer grid. This is the same data resampled and adds no information.
 
 ## Limitations
